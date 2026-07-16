@@ -161,3 +161,15 @@ class Storage:
 
     async def open_tasks(self) -> list[Task]:
         return [t for t in await self.all() if t.status == "open"]
+
+    def _settings_dict(self) -> dict:
+        try:
+            sh = self._connect().spreadsheet
+            sws = sh.worksheet("Settings")
+            rows = sws.get_all_records(numericise_ignore=["all"])
+            return {str(r.get("key", "")): str(r.get("value", "")) for r in rows}
+        except Exception:
+            return {}
+
+    async def settings(self) -> dict:
+        return await asyncio.to_thread(self._settings_dict)
