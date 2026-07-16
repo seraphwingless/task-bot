@@ -104,7 +104,7 @@ class Storage:
 
     def _all(self) -> list[Task]:
         ws = self._connect()
-        records = ws.get_all_records(expected_headers=HEADER)
+        records = ws.get_all_records(expected_headers=HEADER, numericise_ignore=["all"])
         tasks = []
         for r in records:
             tasks.append(Task(**{k: str(r.get(k, "")) for k in HEADER}))
@@ -121,7 +121,7 @@ class Storage:
     def _add(self, task: Task) -> Task:
         ws = self._connect()
         if not task.id:
-            task.id = uuid.uuid4().hex[:8]
+            task.id = "t" + uuid.uuid4().hex[:7]
         if not task.created_at:
             task.created_at = datetime.now().isoformat(timespec="seconds")
         row = [getattr(task, k) for k in HEADER]
