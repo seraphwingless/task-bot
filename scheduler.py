@@ -68,8 +68,6 @@ class Reminders:
         if _in_quiet(now, st):          # тихие часы — молчим
             return
 
-        nag_int = _int(st.get("nag_interval_min"), self.nag_interval_min)
-
         for t in tasks:
             due = t.due_dt()
             if not due:
@@ -88,11 +86,12 @@ class Reminders:
                 await self.storage.update(t)
                 continue
 
-            # 2. Пинание по просрочке — только если у задачи включено
-            if now > due and t.nag_on == "1" and nag_int > 0:
+            # 2. Пинание по просрочке — интервал берётся из самой задачи
+            per_nag = 60 if t.nag_on == "1" else _int(t.nag_on, 0)
+            if now > due and per_nag > 0:
                 last = _parse(t.last_nagged_at)
                 mins = (now - (last or due)).total_seconds() / 60
-                if last is not None and mins >= nag_int:
+                if last is not None and mins >= per_nag:
                     overdue_h = int((now - due).total_seconds() // 3600)
                     tail = f" (просрочено на {overdue_h} ч)" if overdue_h else ""
                     await self._send(f"❗️ <b>Просрочено{tail}</b>\n\n{fmt_task(t)}", t.id)
