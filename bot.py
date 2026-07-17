@@ -36,7 +36,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 TZ = os.getenv("TIMEZONE", "Europe/Lisbon")
 NAG_INTERVAL_MIN = int(os.getenv("NAG_INTERVAL_MIN", "60"))
 
-storage = Storage(DATABASE_URL)
+storage = Storage(DATABASE_URL, OWNER_ID)
 router = Router()
 
 # Черновики задач (ещё не сохранённые в таблицу), ключ — id черновика.
@@ -58,17 +58,17 @@ HELP = (
 
 # --- owner-only middleware ---
 @router.message.outer_middleware
-async def only_owner_msg(handler, event: Message, data):
-    if event.from_user and event.from_user.id == OWNER_ID:
+async def allow_msg(handler, event: Message, data):
+    if event.from_user and await storage.is_allowed(event.from_user.id):
         return await handler(event, data)
     return None
 
 
 @router.callback_query.outer_middleware
-async def only_owner_cb(handler, event: CallbackQuery, data):
-    if event.from_user and event.from_user.id == OWNER_ID:
+async def allow_cb(handler, event: CallbackQuery, data):
+    if event.from_user and await storage.is_allowed(event.from_user.id):
         return await handler(event, data)
-    return await event.answer("Это личный бот.", show_alert=True)
+    return await event.answer("Доступ только по приглашению.", show_alert=True)
 
 
 # --- команды ---
@@ -94,7 +94,7 @@ async def cmd_overdue(message: Message):
 
 
 async def _show_list(message: Message, scope: str):
-    tasks = await storage.open_tasks()
+    tasks = await storage.open_tasks(message.from_user.id)
     now = now_tz(TZ).replace(tzinfo=None)
     if scope == "today":
         end = now.replace(hour=23, minute=59, second=59, microsecond=0)
@@ -199,7 +199,7 @@ async def on_draft_nav(cq: CallbackQuery):
         draft.status = "open"
         if draft.due_at and not draft.remind_at:
             draft.remind_at = draft.due_at
-        await storage.add(draft)
+        await storage.add(cq.from_user.id, draft)
         DRAFTS.pop(task_id, None)
         await cq.message.edit_text(f"✅ Сохранено:\n\n{fmt_task(draft)}")
     await cq.answer()
@@ -247,7 +247,7 @@ async def on_due_manual(cq: CallbackQuery):
 @router.callback_query(F.data.startswith("done:"))
 async def on_done(cq: CallbackQuery):
     _, _, task_id = cq.data.partition(":")
-    t = await storage.get(task_id)
+    t = await storage.get(cq.from_user.id, task_id)
     if not t:
         await cq.answer("Задача не найдена.", show_alert=True)
         return
@@ -266,7 +266,7 @@ async def on_done(cq: CallbackQuery):
                 recurrence=t.recurrence, status="open", attachments=t.attachments,
                 reminders=t.reminders, nag_on=t.nag_on,
             )
-            await storage.add(copy)
+            await storage.add(cq.from_user.id, copy)
     await cq.message.edit_text(f"✅ Выполнено: <s>{_short(t.title)}</s>")
     await cq.answer("Готово")
 
@@ -274,7 +274,7 @@ async def on_done(cq: CallbackQuery):
 @router.callback_query(F.data.startswith("snooze:"))
 async def on_snooze(cq: CallbackQuery):
     _, _, task_id = cq.data.partition(":")
-    t = await storage.get(task_id)
+    t = await storage.get(cq.from_user.id, task_id)
     if not t:
         await cq.answer("Задача не найдена.", show_alert=True)
         return
@@ -292,7 +292,7 @@ async def on_snooze(cq: CallbackQuery):
 @router.callback_query(F.data.startswith("del:"))
 async def on_del(cq: CallbackQuery):
     _, _, task_id = cq.data.partition(":")
-    await storage.delete(task_id)
+    await storage.delete(cq.from_user.id, task_id)
     await cq.message.edit_text("🗑 Удалено.")
     await cq.answer("Удалено")
 

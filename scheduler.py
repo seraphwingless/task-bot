@@ -1,6 +1,6 @@
-"""Планировщик: напоминания к дедлайну и 'пинания' при просрочке.
-Настройки (интервал пинков, напоминать заранее, тихие часы) читаются из листа
-'Settings' в таблице — их задаёт пользователь в Mini App."""
+"""Планировщик: напоминания к сроку и пинки при просрочке — для всех пользователей.
+Настройки напоминаний (кол-во, «за N до», частота пинков) — в самой задаче;
+тихие часы — в настройках каждого пользователя."""
 from __future__ import annotations
 
 import json
@@ -44,7 +44,7 @@ def _in_quiet(now: datetime, st: dict) -> bool:
         return False
     if start < end:
         return start <= cur < end
-    return cur >= start or cur < end   # окно через полночь
+    return cur >= start or cur < end
 
 
 class Reminders:
@@ -58,35 +58,40 @@ class Reminders:
 
     async def tick(self) -> None:
         try:
-            tasks = await self.storage.open_tasks()
-            st = await self.storage.settings()
+            tasks = await self.storage.open_tasks_all()
         except Exception as e:  # noqa: BLE001
-            log.warning("Не смог прочитать задачи/настройки: %s", e)
+            log.warning("Не смог прочитать задачи: %s", e)
             return
 
         now = now_tz(self.tz).replace(tzinfo=None)
-        if _in_quiet(now, st):          # тихие часы — молчим
-            return
+        settings_cache: dict[int, dict] = {}
 
         for t in tasks:
+            uid = t.user_id or self.owner_id
+            if uid not in settings_cache:
+                try:
+                    settings_cache[uid] = await self.storage.settings(uid)
+                except Exception:  # noqa: BLE001
+                    settings_cache[uid] = {}
+            if _in_quiet(now, settings_cache[uid]):
+                continue
+
             due = t.due_dt()
             if not due:
                 continue
 
-            # 1. Напоминания задачи (каждое «за N минут до срока» срабатывает один раз)
             offsets = t.reminder_offsets()
             fired = t.fired_offsets()
             new_fired = list(fired)
             for off in offsets:
                 if off not in fired and now >= (due - timedelta(minutes=off)):
-                    await self._send(f"⏰ <b>Напоминание</b>\n\n{fmt_task(t)}", t.id)
+                    await self._send(uid, f"⏰ <b>Напоминание</b>\n\n{fmt_task(t)}", t.id)
                     new_fired.append(off)
             if new_fired != fired:
                 t.reminded = json.dumps(new_fired)
                 await self.storage.update(t)
                 continue
 
-            # 2. Пинание по просрочке — интервал берётся из самой задачи
             per_nag = 60 if t.nag_on == "1" else _int(t.nag_on, 0)
             if now > due and per_nag > 0:
                 last = _parse(t.last_nagged_at)
@@ -94,15 +99,15 @@ class Reminders:
                 if last is not None and mins >= per_nag:
                     overdue_h = int((now - due).total_seconds() // 3600)
                     tail = f" (просрочено на {overdue_h} ч)" if overdue_h else ""
-                    await self._send(f"❗️ <b>Просрочено{tail}</b>\n\n{fmt_task(t)}", t.id)
+                    await self._send(uid, f"❗️ <b>Просрочено{tail}</b>\n\n{fmt_task(t)}", t.id)
                     t.last_nagged_at = now.isoformat(timespec="seconds")
                     await self.storage.update(t)
                 elif last is None:
                     t.last_nagged_at = now.isoformat(timespec="seconds")
                     await self.storage.update(t)
 
-    async def _send(self, text: str, task_id: str) -> None:
+    async def _send(self, uid: int, text: str, task_id: str) -> None:
         try:
-            await self.bot.send_message(self.owner_id, text, reply_markup=task_actions_kb(task_id))
+            await self.bot.send_message(uid, text, reply_markup=task_actions_kb(task_id))
         except Exception as e:  # noqa: BLE001
-            log.warning("Не смог отправить напоминание: %s", e)
+            log.warning("Не смог отправить напоминание пользователю %s: %s", uid, e)

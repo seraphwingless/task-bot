@@ -1,8 +1,8 @@
-"""Хранилище задач бота на Postgres (asyncpg). Общая база с Mini App."""
+"""Хранилище бота на Postgres (asyncpg), многопользовательское.
+Общая база с Mini App. Данные привязаны к user_id; доступ по allowed_users."""
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -31,10 +31,9 @@ CREATE TABLE IF NOT EXISTS tasks(
   reminders text DEFAULT '', nag_on text DEFAULT '1');
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminders text DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS nag_on text DEFAULT '1';
-CREATE TABLE IF NOT EXISTS categories(
-  seq bigserial, name text PRIMARY KEY, emoji text DEFAULT '', color text DEFAULT '#888780');
-CREATE TABLE IF NOT EXISTS comments(id text PRIMARY KEY, task_id text, body text, created_at text);
-CREATE TABLE IF NOT EXISTS settings(key text PRIMARY KEY, value text);
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS user_id bigint;
+CREATE TABLE IF NOT EXISTS allowed_users(user_id bigint PRIMARY KEY, name text DEFAULT '', added_at text DEFAULT '');
+CREATE TABLE IF NOT EXISTS user_settings(user_id bigint, key text, value text, PRIMARY KEY(user_id, key));
 """
 
 
@@ -65,18 +64,17 @@ class Task:
     last_nagged_at: str = ""
     reminders: str = ""
     nag_on: str = "1"
+    user_id: int = 0
 
     def reminder_offsets(self) -> list[int]:
         try:
-            v = json.loads(self.reminders) if self.reminders else []
-            return [int(x) for x in v]
+            return [int(x) for x in (json.loads(self.reminders) if self.reminders else [])]
         except (ValueError, TypeError):
             return []
 
     def fired_offsets(self) -> list[int]:
         try:
-            v = json.loads(self.reminded) if self.reminded.startswith("[") else []
-            return [int(x) for x in v]
+            return [int(x) for x in (json.loads(self.reminded) if self.reminded.startswith("[") else [])]
         except (ValueError, TypeError, AttributeError):
             return []
 
@@ -96,8 +94,9 @@ class Task:
 
 
 class Storage:
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, owner_id: int):
         self._dsn = dsn
+        self._owner = int(owner_id)
         self._pool = None
 
     async def _p(self):
@@ -105,50 +104,62 @@ class Storage:
             self._pool = await asyncpg.create_pool(self._dsn, ssl=False, min_size=1, max_size=5)
             async with self._pool.acquire() as c:
                 await c.execute(DDL)
+                await c.execute("UPDATE tasks SET user_id=$1 WHERE user_id IS NULL", self._owner)
+                await c.execute("INSERT INTO allowed_users(user_id,name,added_at) VALUES($1,'Владелец',$2) "
+                                "ON CONFLICT DO NOTHING", self._owner, datetime.now().isoformat(timespec="seconds"))
         return self._pool
 
     def _mk(self, r) -> Task:
-        return Task(**{k: (str(r[k]) if r[k] is not None else "") for k in TASK_FIELDS})
+        d = {k: (str(r[k]) if r[k] is not None else "") for k in TASK_FIELDS}
+        d["user_id"] = int(r["user_id"]) if r["user_id"] is not None else 0
+        return Task(**d)
 
-    async def add(self, task: Task) -> Task:
+    async def is_allowed(self, uid: int) -> bool:
+        if int(uid) == self._owner:
+            return True
+        p = await self._p()
+        return bool(await p.fetchval("SELECT 1 FROM allowed_users WHERE user_id=$1", int(uid)))
+
+    async def add(self, uid: int, task: Task) -> Task:
         if not task.id:
             task.id = "t" + uuid.uuid4().hex[:7]
         if not task.created_at:
             task.created_at = datetime.now().isoformat(timespec="seconds")
+        task.user_id = int(uid)
         p = await self._p()
-        ph = ",".join("$" + str(i + 1) for i in range(len(TASK_FIELDS)))
-        await p.execute(f"INSERT INTO tasks({','.join(TASK_FIELDS)}) VALUES({ph}) "
-                        "ON CONFLICT(id) DO NOTHING",
-                        *[str(getattr(task, k) or "") for k in TASK_FIELDS])
+        cols = TASK_FIELDS + ["user_id"]
+        vals = [str(getattr(task, k) or "") for k in TASK_FIELDS] + [int(uid)]
+        ph = ",".join("$" + str(i + 1) for i in range(len(cols)))
+        await p.execute(f"INSERT INTO tasks({','.join(cols)}) VALUES({ph}) ON CONFLICT(id) DO NOTHING", *vals)
         return task
 
     async def update(self, task: Task) -> None:
         p = await self._p()
         fields = [k for k in TASK_FIELDS if k != "id"]
         sets = ",".join(f"{k}=${i + 2}" for i, k in enumerate(fields))
-        await p.execute(f"UPDATE tasks SET {sets} WHERE id=$1",
-                        task.id, *[str(getattr(task, k) or "") for k in fields])
+        await p.execute(f"UPDATE tasks SET {sets} WHERE id=$1", task.id,
+                        *[str(getattr(task, k) or "") for k in fields])
 
-    async def delete(self, task_id: str) -> None:
+    async def delete(self, uid: int, task_id: str) -> None:
         p = await self._p()
-        await p.execute("DELETE FROM tasks WHERE id=$1", task_id)
+        await p.execute("DELETE FROM tasks WHERE id=$1 AND user_id=$2", task_id, int(uid))
 
-    async def all(self) -> list[Task]:
+    async def get(self, uid: int, task_id: str) -> Optional[Task]:
         p = await self._p()
-        rows = await p.fetch("SELECT * FROM tasks ORDER BY seq")
-        return [self._mk(r) for r in rows]
-
-    async def get(self, task_id: str) -> Optional[Task]:
-        p = await self._p()
-        r = await p.fetchrow("SELECT * FROM tasks WHERE id=$1", task_id)
+        r = await p.fetchrow("SELECT * FROM tasks WHERE id=$1 AND user_id=$2", task_id, int(uid))
         return self._mk(r) if r else None
 
-    async def open_tasks(self) -> list[Task]:
+    async def open_tasks(self, uid: int) -> list[Task]:
+        p = await self._p()
+        rows = await p.fetch("SELECT * FROM tasks WHERE status='open' AND user_id=$1 ORDER BY seq", int(uid))
+        return [self._mk(r) for r in rows]
+
+    async def open_tasks_all(self) -> list[Task]:
         p = await self._p()
         rows = await p.fetch("SELECT * FROM tasks WHERE status='open' ORDER BY seq")
         return [self._mk(r) for r in rows]
 
-    async def settings(self) -> dict:
+    async def settings(self, uid: int) -> dict:
         p = await self._p()
-        rows = await p.fetch("SELECT key,value FROM settings")
+        rows = await p.fetch("SELECT key,value FROM user_settings WHERE user_id=$1", int(uid))
         return {r["key"]: r["value"] for r in rows}
