@@ -264,6 +264,7 @@ async def on_done(cq: CallbackQuery):
                 due_at=nxt.isoformat(timespec="seconds"),
                 remind_at=nxt.isoformat(timespec="seconds"),
                 recurrence=t.recurrence, status="open", attachments=t.attachments,
+                reminders=t.reminders, nag_on=t.nag_on,
             )
             await storage.add(copy)
     await cq.message.edit_text(f"✅ Выполнено: <s>{_short(t.title)}</s>")

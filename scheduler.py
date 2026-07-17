@@ -3,6 +3,7 @@
 'Settings' в таблице — их задаёт пользователь в Mini App."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta
 
@@ -68,31 +69,36 @@ class Reminders:
             return
 
         nag_int = _int(st.get("nag_interval_min"), self.nag_interval_min)
-        lead = _int(st.get("lead_time_min"), 0)
 
         for t in tasks:
             due = t.due_dt()
+            if not due:
+                continue
 
-            # 1. Напоминание (за lead минут до срока; без срока — по remind_at)
-            if not t.reminded:
-                if due:
-                    if now >= (due - timedelta(minutes=lead)):
-                        await self._send(f"⏰ <b>Напоминание</b>\n\n{fmt_task(t)}", t.id)
-                        t.reminded = "1"; await self.storage.update(t); continue
-                else:
-                    remind = t.remind_dt()
-                    if remind and remind <= now:
-                        await self._send(f"⏰ <b>Напоминание</b>\n\n{fmt_task(t)}", t.id)
-                        t.reminded = "1"; await self.storage.update(t); continue
+            # 1. Напоминания задачи (каждое «за N минут до срока» срабатывает один раз)
+            offsets = t.reminder_offsets()
+            fired = t.fired_offsets()
+            new_fired = list(fired)
+            for off in offsets:
+                if off not in fired and now >= (due - timedelta(minutes=off)):
+                    await self._send(f"⏰ <b>Напоминание</b>\n\n{fmt_task(t)}", t.id)
+                    new_fired.append(off)
+            if new_fired != fired:
+                t.reminded = json.dumps(new_fired)
+                await self.storage.update(t)
+                continue
 
-            # 2. Пинание по просрочке (если интервал > 0)
-            if due and now > due and nag_int > 0:
+            # 2. Пинание по просрочке — только если у задачи включено
+            if now > due and t.nag_on == "1" and nag_int > 0:
                 last = _parse(t.last_nagged_at)
                 mins = (now - (last or due)).total_seconds() / 60
-                if last is None or mins >= nag_int:
+                if last is not None and mins >= nag_int:
                     overdue_h = int((now - due).total_seconds() // 3600)
                     tail = f" (просрочено на {overdue_h} ч)" if overdue_h else ""
                     await self._send(f"❗️ <b>Просрочено{tail}</b>\n\n{fmt_task(t)}", t.id)
+                    t.last_nagged_at = now.isoformat(timespec="seconds")
+                    await self.storage.update(t)
+                elif last is None:
                     t.last_nagged_at = now.isoformat(timespec="seconds")
                     await self.storage.update(t)
 

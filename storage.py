@@ -14,7 +14,7 @@ TASK_FIELDS = [
     "id", "title", "notes", "category", "priority",
     "due_at", "remind_at", "recurrence", "status",
     "created_at", "completed_at", "attachments",
-    "reminded", "last_nagged_at",
+    "reminded", "last_nagged_at", "reminders", "nag_on",
 ]
 
 PRIORITIES = ["P1", "P2", "P3", "P4", "P5"]
@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS tasks(
   category text DEFAULT '', priority text DEFAULT 'P3', due_at text DEFAULT '',
   remind_at text DEFAULT '', recurrence text DEFAULT 'none', status text DEFAULT 'open',
   created_at text DEFAULT '', completed_at text DEFAULT '', attachments text DEFAULT '',
-  reminded text DEFAULT '', last_nagged_at text DEFAULT '');
+  reminded text DEFAULT '', last_nagged_at text DEFAULT '',
+  reminders text DEFAULT '', nag_on text DEFAULT '1');
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminders text DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS nag_on text DEFAULT '1';
 CREATE TABLE IF NOT EXISTS categories(
   seq bigserial, name text PRIMARY KEY, emoji text DEFAULT '', color text DEFAULT '#888780');
 CREATE TABLE IF NOT EXISTS comments(id text PRIMARY KEY, task_id text, body text, created_at text);
@@ -60,6 +63,22 @@ class Task:
     attachments: str = ""
     reminded: str = ""
     last_nagged_at: str = ""
+    reminders: str = ""
+    nag_on: str = "1"
+
+    def reminder_offsets(self) -> list[int]:
+        try:
+            v = json.loads(self.reminders) if self.reminders else []
+            return [int(x) for x in v]
+        except (ValueError, TypeError):
+            return []
+
+    def fired_offsets(self) -> list[int]:
+        try:
+            v = json.loads(self.reminded) if self.reminded.startswith("[") else []
+            return [int(x) for x in v]
+        except (ValueError, TypeError, AttributeError):
+            return []
 
     def attachments_list(self) -> list[dict]:
         if not self.attachments:
