@@ -1,35 +1,47 @@
-"""Слой хранения задач в Google Sheets.
-
-Таблица (лист "Tasks") хранит по одной задаче в строке.
-Файл gspread синхронный, поэтому все обращения оборачиваем в asyncio.to_thread,
-чтобы не блокировать event loop бота.
-"""
+"""Хранилище задач бота на Postgres (asyncpg). Общая база с Mini App."""
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-import gspread
-from google.oauth2.service_account import Credentials
+import asyncpg
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-
-# Порядок колонок в таблице. Менять только добавлением в конец.
-HEADER = [
+TASK_FIELDS = [
     "id", "title", "notes", "category", "priority",
     "due_at", "remind_at", "recurrence", "status",
     "created_at", "completed_at", "attachments",
     "reminded", "last_nagged_at",
 ]
 
-PRIORITIES = ["P1", "P2", "P3", "P4"]
-CATEGORIES = ["личное", "бизнес", "семья"]
+PRIORITIES = ["P1", "P2", "P3", "P4", "P5"]
+CATEGORIES = ["личное", "бизнес", "семья", "спорт"]
 RECURRENCES = ["none", "daily", "weekly", "monthly", "yearly"]
+
+DDL = """
+CREATE TABLE IF NOT EXISTS tasks(
+  seq bigserial, id text PRIMARY KEY, title text DEFAULT '', notes text DEFAULT '',
+  category text DEFAULT '', priority text DEFAULT 'P3', due_at text DEFAULT '',
+  remind_at text DEFAULT '', recurrence text DEFAULT 'none', status text DEFAULT 'open',
+  created_at text DEFAULT '', completed_at text DEFAULT '', attachments text DEFAULT '',
+  reminded text DEFAULT '', last_nagged_at text DEFAULT '');
+CREATE TABLE IF NOT EXISTS categories(
+  seq bigserial, name text PRIMARY KEY, emoji text DEFAULT '', color text DEFAULT '#888780');
+CREATE TABLE IF NOT EXISTS comments(id text PRIMARY KEY, task_id text, body text, created_at text);
+CREATE TABLE IF NOT EXISTS settings(key text PRIMARY KEY, value text);
+"""
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -39,15 +51,15 @@ class Task:
     notes: str = ""
     category: str = ""
     priority: str = "P3"
-    due_at: str = ""          # ISO 8601, напр. 2026-07-16T18:00:00
-    remind_at: str = ""       # когда напомнить (по умолч. = due_at)
+    due_at: str = ""
+    remind_at: str = ""
     recurrence: str = "none"
-    status: str = "open"      # open | done
+    status: str = "open"
     created_at: str = ""
     completed_at: str = ""
-    attachments: str = ""     # JSON-список [{"type","file_id","name"}]
-    reminded: str = ""        # "1" если напоминание уже отправлено
-    last_nagged_at: str = ""  # ISO последнего "пинка" по просрочке
+    attachments: str = ""
+    reminded: str = ""
+    last_nagged_at: str = ""
 
     def attachments_list(self) -> list[dict]:
         if not self.attachments:
@@ -64,112 +76,60 @@ class Task:
         return _parse_iso(self.remind_at or self.due_at)
 
 
-def _parse_iso(value: str) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-
 class Storage:
-    def __init__(self, sheet_id: str):
-        self._sheet_id = sheet_id
-        self._ws: Optional[gspread.Worksheet] = None
+    def __init__(self, dsn: str):
+        self._dsn = dsn
+        self._pool = None
 
-    # --- подключение ---
-    def _connect(self) -> gspread.Worksheet:
-        if self._ws is not None:
-            return self._ws
-        raw = os.getenv("GOOGLE_CREDENTIALS_JSON")
-        if raw:
-            info = json.loads(raw)
-            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-        else:
-            path = os.getenv("GOOGLE_CREDENTIALS_FILE", "service_account.json")
-            creds = Credentials.from_service_account_file(path, scopes=SCOPES)
-        client = gspread.authorize(creds)
-        sh = client.open_by_key(self._sheet_id)
-        try:
-            ws = sh.worksheet("Tasks")
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title="Tasks", rows=1000, cols=len(HEADER))
-        # Гарантируем строку заголовков.
-        first_row = ws.row_values(1)
-        if first_row != HEADER:
-            ws.update([HEADER], "A1")
-        self._ws = ws
-        return ws
+    async def _p(self):
+        if self._pool is None:
+            self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=5)
+            async with self._pool.acquire() as c:
+                await c.execute(DDL)
+        return self._pool
 
-    def _all(self) -> list[Task]:
-        ws = self._connect()
-        records = ws.get_all_records(expected_headers=HEADER, numericise_ignore=["all"])
-        tasks = []
-        for r in records:
-            tasks.append(Task(**{k: str(r.get(k, "")) for k in HEADER}))
-        return tasks
+    def _mk(self, r) -> Task:
+        return Task(**{k: (str(r[k]) if r[k] is not None else "") for k in TASK_FIELDS})
 
-    def _row_index(self, task_id: str) -> Optional[int]:
-        ws = self._connect()
-        ids = ws.col_values(1)  # включает заголовок в позиции 1
-        for i, val in enumerate(ids, start=1):
-            if val == task_id:
-                return i
-        return None
-
-    def _add(self, task: Task) -> Task:
-        ws = self._connect()
+    async def add(self, task: Task) -> Task:
         if not task.id:
             task.id = "t" + uuid.uuid4().hex[:7]
         if not task.created_at:
             task.created_at = datetime.now().isoformat(timespec="seconds")
-        row = [getattr(task, k) for k in HEADER]
-        ws.append_row(row, value_input_option="RAW")
+        p = await self._p()
+        ph = ",".join("$" + str(i + 1) for i in range(len(TASK_FIELDS)))
+        await p.execute(f"INSERT INTO tasks({','.join(TASK_FIELDS)}) VALUES({ph}) "
+                        "ON CONFLICT(id) DO NOTHING",
+                        *[str(getattr(task, k) or "") for k in TASK_FIELDS])
         return task
 
-    def _update(self, task: Task) -> None:
-        ws = self._connect()
-        idx = self._row_index(task.id)
-        if idx is None:
-            return
-        row = [getattr(task, k) for k in HEADER]
-        ws.update([row], f"A{idx}")
-
-    def _delete(self, task_id: str) -> None:
-        ws = self._connect()
-        idx = self._row_index(task_id)
-        if idx and idx > 1:
-            ws.delete_rows(idx)
-
-    # --- async-обёртки (публичный API) ---
-    async def add(self, task: Task) -> Task:
-        return await asyncio.to_thread(self._add, task)
-
     async def update(self, task: Task) -> None:
-        await asyncio.to_thread(self._update, task)
+        p = await self._p()
+        fields = [k for k in TASK_FIELDS if k != "id"]
+        sets = ",".join(f"{k}=${i + 2}" for i, k in enumerate(fields))
+        await p.execute(f"UPDATE tasks SET {sets} WHERE id=$1",
+                        task.id, *[str(getattr(task, k) or "") for k in fields])
 
     async def delete(self, task_id: str) -> None:
-        await asyncio.to_thread(self._delete, task_id)
+        p = await self._p()
+        await p.execute("DELETE FROM tasks WHERE id=$1", task_id)
 
     async def all(self) -> list[Task]:
-        return await asyncio.to_thread(self._all)
+        p = await self._p()
+        rows = await p.fetch("SELECT * FROM tasks ORDER BY seq")
+        return [self._mk(r) for r in rows]
 
     async def get(self, task_id: str) -> Optional[Task]:
-        tasks = await self.all()
-        return next((t for t in tasks if t.id == task_id), None)
+        p = await self._p()
+        r = await p.fetchrow("SELECT * FROM tasks WHERE id=$1", task_id)
+        return self._mk(r) if r else None
 
     async def open_tasks(self) -> list[Task]:
-        return [t for t in await self.all() if t.status == "open"]
-
-    def _settings_dict(self) -> dict:
-        try:
-            sh = self._connect().spreadsheet
-            sws = sh.worksheet("Settings")
-            rows = sws.get_all_records(numericise_ignore=["all"])
-            return {str(r.get("key", "")): str(r.get("value", "")) for r in rows}
-        except Exception:
-            return {}
+        p = await self._p()
+        rows = await p.fetch("SELECT * FROM tasks WHERE status='open' ORDER BY seq")
+        return [self._mk(r) for r in rows]
 
     async def settings(self) -> dict:
-        return await asyncio.to_thread(self._settings_dict)
+        p = await self._p()
+        rows = await p.fetch("SELECT key,value FROM settings")
+        return {r["key"]: r["value"] for r in rows}

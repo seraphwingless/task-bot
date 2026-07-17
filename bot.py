@@ -32,11 +32,11 @@ log = logging.getLogger("bot")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
-SHEET_ID = os.environ["SHEET_ID"]
-TZ = os.getenv("TIMEZONE", "Europe/Riga")
+DATABASE_URL = os.environ["DATABASE_URL"]
+TZ = os.getenv("TIMEZONE", "Europe/Lisbon")
 NAG_INTERVAL_MIN = int(os.getenv("NAG_INTERVAL_MIN", "60"))
 
-storage = Storage(SHEET_ID)
+storage = Storage(DATABASE_URL)
 router = Router()
 
 # Черновики задач (ещё не сохранённые в таблицу), ключ — id черновика.
