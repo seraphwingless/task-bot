@@ -18,7 +18,7 @@ TASK_FIELDS = [
 ]
 
 PRIORITIES = ["P1", "P2", "P3", "P4", "P5"]
-CATEGORIES = ["личное", "бизнес", "семья", "спорт"]
+CATEGORIES = ["Личное", "Бизнес", "Семья", "Спорт"]
 RECURRENCES = ["none", "daily", "weekly", "monthly", "yearly"]
 
 DDL = """
@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS tasks(
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reminders text DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS nag_on text DEFAULT '1';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS user_id bigint;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS checklist text DEFAULT '0';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS checked_date text DEFAULT '';
 CREATE TABLE IF NOT EXISTS allowed_users(user_id bigint PRIMARY KEY, name text DEFAULT '', added_at text DEFAULT '');
 CREATE TABLE IF NOT EXISTS user_settings(user_id bigint, key text, value text, PRIMARY KEY(user_id, key));
 """
@@ -151,12 +153,13 @@ class Storage:
 
     async def open_tasks(self, uid: int) -> list[Task]:
         p = await self._p()
-        rows = await p.fetch("SELECT * FROM tasks WHERE status='open' AND user_id=$1 ORDER BY seq", int(uid))
+        rows = await p.fetch("SELECT * FROM tasks WHERE status='open' AND coalesce(checklist,'0')<>'1' "
+                             "AND user_id=$1 ORDER BY seq", int(uid))
         return [self._mk(r) for r in rows]
 
     async def open_tasks_all(self) -> list[Task]:
         p = await self._p()
-        rows = await p.fetch("SELECT * FROM tasks WHERE status='open' ORDER BY seq")
+        rows = await p.fetch("SELECT * FROM tasks WHERE status='open' AND coalesce(checklist,'0')<>'1' ORDER BY seq")
         return [self._mk(r) for r in rows]
 
     async def settings(self, uid: int) -> dict:
