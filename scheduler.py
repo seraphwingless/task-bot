@@ -5,15 +5,49 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from keyboards import task_actions_kb
 from storage import Storage
 from utils import fmt_task, now_tz
 
 log = logging.getLogger("scheduler")
+
+WEBAPP_URL = os.getenv("WEBAPP_URL", "")
+RU_WD = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+RU_MON = ["января", "февраля", "марта", "апреля", "мая", "июня",
+          "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+MAX_OVERDUE, MAX_TODAY, MAX_CHECK = 5, 7, 7
+
+
+def _esc(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _overdue_label(minutes: float) -> str:
+    d = int(minutes // 1440)
+    if d:
+        return f"на {d} дн"
+    h = int((minutes % 1440) // 60)
+    if h:
+        return f"на {h} ч"
+    return f"на {max(1, int(minutes))} мин"
+
+
+def _line(t, emoji: str, with_time: bool) -> str:
+    due = t.due_dt()
+    when = (due.strftime("%H:%M") + " ") if (with_time and due) else ""
+    cat = (emoji + " ") if emoji else ""
+    return f"  {when}{t.priority or 'P3'} {cat}{_esc(t.title)}"
+
+
+def _tail(items: list, shown: int) -> str:
+    left = len(items) - shown
+    return f"\n  <i>и ещё {left}</i>" if left > 0 else ""
 
 
 def _int(v, default: int) -> int:
@@ -57,6 +91,11 @@ class Reminders:
         self.nag_interval_min = nag_interval_min
 
     async def tick(self) -> None:
+        try:
+            await self.digests()
+        except Exception as e:  # noqa: BLE001
+            log.warning("Дайджест не отработал: %s", e)
+
         try:
             tasks = await self.storage.open_tasks_all()
         except Exception as e:  # noqa: BLE001
@@ -111,3 +150,113 @@ class Reminders:
             await self.bot.send_message(uid, text, reply_markup=task_actions_kb(task_id))
         except Exception as e:  # noqa: BLE001
             log.warning("Не смог отправить напоминание пользователю %s: %s", uid, e)
+
+    # ---------------- дайджесты ----------------
+    async def digests(self) -> None:
+        """Утренний дайджест и вечернее превью. Вызывается каждую минуту."""
+        now = now_tz(self.tz).replace(tzinfo=None)
+        today = now.strftime("%Y-%m-%d")
+        try:
+            users = await self.storage.list_users()
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не смог получить список пользователей: %s", e)
+            return
+        for uid in users:
+            try:
+                st = await self.storage.settings(uid)
+            except Exception:  # noqa: BLE001
+                continue
+            await self._maybe(uid, st, now, today, "digest",
+                              st.get("digest_time", "08:00"), st.get("digest_on", "1"), self._morning)
+            await self._maybe(uid, st, now, today, "evening",
+                              st.get("evening_time", "20:00"), st.get("evening_on", "1"), self._evening)
+
+    async def _maybe(self, uid, st, now, today, key, hhmm, enabled, builder) -> None:
+        if enabled != "1" or st.get(key + "_last", "") == today:
+            return
+        try:
+            hh, mm = map(int, str(hhmm).split(":"))
+        except ValueError:
+            return
+        sched = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if now < sched:
+            return
+        # Если бот лежал и окно упущено — помечаем день отправленным, но не шлём задним числом.
+        if (now - sched).total_seconds() > 7200:
+            await self.storage.set_setting(uid, key + "_last", today)
+            return
+        try:
+            text = await builder(uid, now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не смог собрать %s для %s: %s", key, uid, e)
+            return
+        await self.storage.set_setting(uid, key + "_last", today)
+        if text:
+            await self._send_digest(uid, text)
+
+    async def _morning(self, uid: int, now: datetime) -> str:
+        tasks = await self.storage.open_all(uid)
+        emo = await self.storage.cat_emoji(uid)
+        today, yday = now.date(), (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        overdue, plan, check = [], [], []
+        for t in tasks:
+            if t.checklist == "1":
+                check.append(t)
+                continue
+            due = t.due_dt()
+            if not due:
+                continue
+            if due < now:
+                overdue.append(t)
+            elif due.date() == today:
+                plan.append(t)
+        if not overdue and not plan and not check:
+            return ""
+
+        overdue.sort(key=lambda x: x.due_at)
+        plan.sort(key=lambda x: x.due_at)
+        wd, d, mon = RU_WD[now.weekday()], now.day, RU_MON[now.month - 1]
+        out = [f"☀️ <b>Доброе утро.</b> {wd.capitalize()}, {d} {mon}"]
+
+        if overdue:
+            out.append(f"\n🔥 <b>Просрочено — {len(overdue)}</b>")
+            for t in overdue[:MAX_OVERDUE]:
+                late = _overdue_label((now - t.due_dt()).total_seconds() / 60)
+                out.append(_line(t, emo.get(t.category, ""), False) + f" — {late}")
+            out[-1] += _tail(overdue, MAX_OVERDUE)
+        if plan:
+            out.append(f"\n📌 <b>Сегодня — {len(plan)}</b>")
+            for t in plan[:MAX_TODAY]:
+                out.append(_line(t, emo.get(t.category, ""), True))
+            out[-1] += _tail(plan, MAX_TODAY)
+        if check:
+            done_yday = sum(1 for t in check if t.checked_date == yday)
+            out.append(f"\n✅ <b>Чеклист — {len(check)}</b> <i>(вчера {done_yday} из {len(check)})</i>")
+            names = " · ".join(_esc(t.title) for t in check[:MAX_CHECK])
+            out.append("  " + names + (f" <i>и ещё {len(check) - MAX_CHECK}</i>" if len(check) > MAX_CHECK else ""))
+        return "\n".join(out)
+
+    async def _evening(self, uid: int, now: datetime) -> str:
+        tasks = await self.storage.open_all(uid)
+        emo = await self.storage.cat_emoji(uid)
+        tmw = (now + timedelta(days=1)).date()
+        plan = [t for t in tasks if t.checklist != "1" and t.due_dt() and t.due_dt().date() == tmw]
+        if not plan:
+            return ""
+        plan.sort(key=lambda x: x.due_at)
+        out = [f"🌙 <b>Завтра — {len(plan)}</b>"]
+        for t in plan[:MAX_TODAY]:
+            out.append(_line(t, emo.get(t.category, ""), True))
+        out[-1] += _tail(plan, MAX_TODAY)
+        return "\n".join(out)
+
+    async def _send_digest(self, uid: int, text: str) -> None:
+        kb = None
+        if WEBAPP_URL:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text="Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))]])
+        try:
+            await self.bot.send_message(uid, text, reply_markup=kb)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Не смог отправить дайджест пользователю %s: %s", uid, e)

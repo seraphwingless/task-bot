@@ -15,6 +15,7 @@ TASK_FIELDS = [
     "due_at", "remind_at", "recurrence", "status",
     "created_at", "completed_at", "attachments",
     "reminded", "last_nagged_at", "reminders", "nag_on",
+    "checklist", "checked_date",
 ]
 
 PRIORITIES = ["P1", "P2", "P3", "P4", "P5"]
@@ -66,6 +67,8 @@ class Task:
     last_nagged_at: str = ""
     reminders: str = ""
     nag_on: str = "1"
+    checklist: str = "0"
+    checked_date: str = ""
     user_id: int = 0
 
     def reminder_offsets(self) -> list[int]:
@@ -166,3 +169,28 @@ class Storage:
         p = await self._p()
         rows = await p.fetch("SELECT key,value FROM user_settings WHERE user_id=$1", int(uid))
         return {r["key"]: r["value"] for r in rows}
+
+    # ---- для дайджеста ----
+    async def set_setting(self, uid: int, key: str, value: str) -> None:
+        p = await self._p()
+        await p.execute("INSERT INTO user_settings(user_id,key,value) VALUES($1,$2,$3) "
+                        "ON CONFLICT(user_id,key) DO UPDATE SET value=$3", int(uid), key, str(value))
+
+    async def list_users(self) -> list[int]:
+        p = await self._p()
+        rows = await p.fetch("SELECT user_id FROM allowed_users")
+        return [int(r["user_id"]) for r in rows]
+
+    async def open_all(self, uid: int) -> list[Task]:
+        """Все незакрытые задачи пользователя, включая чеклист."""
+        p = await self._p()
+        rows = await p.fetch("SELECT * FROM tasks WHERE status='open' AND user_id=$1 ORDER BY seq", int(uid))
+        return [self._mk(r) for r in rows]
+
+    async def cat_emoji(self, uid: int) -> dict:
+        p = await self._p()
+        try:
+            rows = await p.fetch("SELECT name,emoji FROM user_categories WHERE user_id=$1", int(uid))
+        except Exception:  # noqa: BLE001
+            return {}
+        return {r["name"]: (r["emoji"] or "") for r in rows}
