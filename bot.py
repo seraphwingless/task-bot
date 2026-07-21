@@ -103,9 +103,15 @@ async def cmd_diag(message: Message):
             reach = f"❌ бот НЕ может писать — {type(e).__name__}"
         quiet = (f"{st.get('quiet_start', '23:00')}–{st.get('quiet_end', '08:00')}"
                  if st.get("quiet_on", "1") == "1" else "выключены")
+        utz = st.get("tz") or f"{TZ} (по умолчанию)"
+        try:
+            uloc = now_tz(st.get("tz") or TZ).strftime("%H:%M")
+        except Exception:  # noqa: BLE001
+            uloc = "?"
         out.append(
             f"\n<code>{uid}</code>\n"
             f"  задач: {len(tasks)}, с напоминаниями: {with_rem}, срок впереди: {ahead}\n"
+            f"  пояс: {utz}, у него сейчас {uloc}\n"
             f"  тихие часы: {quiet}\n"
             f"  {reach}")
     await message.answer("\n".join(out))

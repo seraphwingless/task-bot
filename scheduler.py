@@ -90,6 +90,16 @@ class Reminders:
         self.tz = tz
         self.nag_interval_min = nag_interval_min
 
+    def _now(self, st: dict) -> datetime:
+        """Текущее время в поясе пользователя (у каждого свой)."""
+        for tzname in ((st or {}).get("tz"), self.tz):
+            if tzname:
+                try:
+                    return now_tz(tzname).replace(tzinfo=None)
+                except Exception:  # noqa: BLE001
+                    continue
+        return datetime.now()
+
     async def tick(self) -> None:
         try:
             await self.digests()
@@ -102,7 +112,6 @@ class Reminders:
             log.warning("Не смог прочитать задачи: %s", e)
             return
 
-        now = now_tz(self.tz).replace(tzinfo=None)
         settings_cache: dict[int, dict] = {}
 
         for t in tasks:
@@ -112,6 +121,7 @@ class Reminders:
                     settings_cache[uid] = await self.storage.settings(uid)
                 except Exception:  # noqa: BLE001
                     settings_cache[uid] = {}
+            now = self._now(settings_cache[uid])
             if _in_quiet(now, settings_cache[uid]):
                 continue
 
@@ -155,8 +165,6 @@ class Reminders:
     # ---------------- дайджесты ----------------
     async def digests(self) -> None:
         """Утренний дайджест и вечернее превью. Вызывается каждую минуту."""
-        now = now_tz(self.tz).replace(tzinfo=None)
-        today = now.strftime("%Y-%m-%d")
         try:
             users = await self.storage.list_users()
         except Exception as e:  # noqa: BLE001
@@ -167,6 +175,8 @@ class Reminders:
                 st = await self.storage.settings(uid)
             except Exception:  # noqa: BLE001
                 continue
+            now = self._now(st)
+            today = now.strftime("%Y-%m-%d")
             await self._maybe(uid, st, now, today, "digest",
                               st.get("digest_time", "08:00"), st.get("digest_on", "1"), self._morning)
             await self._maybe(uid, st, now, today, "evening",
