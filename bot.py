@@ -54,6 +54,7 @@ HELP = (
     "/overdue — просроченные\n"
     "/help — помощь"
 )
+DIAG_HINT = "/diag — проверка напоминаний (только владелец)"
 
 
 # --- owner-only middleware ---
@@ -76,6 +77,38 @@ async def allow_cb(handler, event: CallbackQuery, data):
 @router.message(Command("help"))
 async def cmd_start(message: Message):
     await message.answer(HELP)
+
+
+@router.message(Command("diag"))
+async def cmd_diag(message: Message):
+    """Почему не приходят напоминания: состояние по каждому пользователю."""
+    if message.from_user.id != OWNER_ID:
+        return
+    now = now_tz(TZ).replace(tzinfo=None)
+    out = [f"🔧 <b>Диагностика</b>\nСейчас: {now.strftime('%d.%m %H:%M')} · {TZ}"]
+    for uid in await storage.list_users():
+        try:
+            tasks = await storage.open_tasks(uid)
+            st = await storage.settings(uid)
+        except Exception as e:  # noqa: BLE001
+            out.append(f"\n<code>{uid}</code>\n  ошибка чтения: {e}")
+            continue
+        with_rem = sum(1 for t in tasks if t.reminder_offsets())
+        ahead = sum(1 for t in tasks if t.due_dt() and t.due_dt() > now)
+        try:
+            m = await message.bot.send_message(uid, "🔧 Проверка связи.")
+            await message.bot.delete_message(uid, m.message_id)
+            reach = "✅ бот может писать"
+        except Exception as e:  # noqa: BLE001
+            reach = f"❌ бот НЕ может писать — {type(e).__name__}"
+        quiet = (f"{st.get('quiet_start', '23:00')}–{st.get('quiet_end', '08:00')}"
+                 if st.get("quiet_on", "1") == "1" else "выключены")
+        out.append(
+            f"\n<code>{uid}</code>\n"
+            f"  задач: {len(tasks)}, с напоминаниями: {with_rem}, срок впереди: {ahead}\n"
+            f"  тихие часы: {quiet}\n"
+            f"  {reach}")
+    await message.answer("\n".join(out))
 
 
 @router.message(Command("list"))

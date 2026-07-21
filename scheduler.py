@@ -148,8 +148,9 @@ class Reminders:
     async def _send(self, uid: int, text: str, task_id: str) -> None:
         try:
             await self.bot.send_message(uid, text, reply_markup=task_actions_kb(task_id))
+            log.info("НАПОМИНАНИЕ отправлено uid=%s task=%s", uid, task_id)
         except Exception as e:  # noqa: BLE001
-            log.warning("Не смог отправить напоминание пользователю %s: %s", uid, e)
+            log.warning("НАПОМИНАНИЕ не ушло uid=%s task=%s: %s", uid, task_id, e)
 
     # ---------------- дайджесты ----------------
     async def digests(self) -> None:
