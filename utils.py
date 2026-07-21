@@ -8,7 +8,16 @@ from zoneinfo import ZoneInfo
 from storage import Task
 
 PRIORITY_EMOJI = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "P4": "⚪"}
-CATEGORY_EMOJI = {"личное": "🏠", "бизнес": "💼", "семья": "👨‍👩‍👧"}
+class _CatEmoji(dict):
+    """Регистронезависимый доступ: 'Личное' и 'личное' — одно и то же."""
+
+    def get(self, key, default=""):
+        return dict.get(self, (key or "").strip().lower(), default)
+
+
+CATEGORY_EMOJI = _CatEmoji({
+    "личное": "🙋‍♂️", "бизнес": "💼", "семья": "👨‍👩‍👧", "спорт": "⚽",
+})
 RECUR_LABEL = {
     "none": "разово", "daily": "каждый день", "weekly": "каждую неделю",
     "monthly": "каждый месяц", "yearly": "каждый год",
@@ -105,7 +114,7 @@ def human_due(iso: str) -> str:
     return dt.strftime("%d.%m %H:%M")
 
 
-def fmt_task(t: Task, with_id: bool = True) -> str:
+def fmt_task(t: Task, with_id: bool = False) -> str:
     parts = [PRIORITY_EMOJI.get(t.priority, "")]
     if t.category:
         parts.append(CATEGORY_EMOJI.get(t.category, ""))
