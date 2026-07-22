@@ -328,6 +328,20 @@ async def on_snooze(cq: CallbackQuery):
     await cq.answer("Отложено")
 
 
+@router.callback_query(F.data.startswith("delask:"))
+async def on_del_ask(cq: CallbackQuery):
+    _, _, task_id = cq.data.partition(":")
+    await cq.message.edit_reply_markup(reply_markup=kb.delete_confirm_kb(task_id))
+    await cq.answer("Точно удалить?")
+
+
+@router.callback_query(F.data.startswith("delno:"))
+async def on_del_no(cq: CallbackQuery):
+    _, _, task_id = cq.data.partition(":")
+    await cq.message.edit_reply_markup(reply_markup=kb.task_actions_kb(task_id))
+    await cq.answer("Отменено")
+
+
 @router.callback_query(F.data.startswith("del:"))
 async def on_del(cq: CallbackQuery):
     _, _, task_id = cq.data.partition(":")

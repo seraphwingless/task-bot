@@ -12,8 +12,16 @@ def task_actions_kb(task_id: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="✅ Готово", callback_data=f"done:{task_id}")
     b.button(text="⏰ +1ч", callback_data=f"snooze:{task_id}")
-    b.button(text="🗑", callback_data=f"del:{task_id}")
+    b.button(text="🗑", callback_data=f"delask:{task_id}")
     b.adjust(3)
+    return b.as_markup()
+
+
+def delete_confirm_kb(task_id: str) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🗑 Точно удалить", callback_data=f"del:{task_id}")
+    b.button(text="‹ Отмена", callback_data=f"delno:{task_id}")
+    b.adjust(2)
     return b.as_markup()
 
 
